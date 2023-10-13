@@ -757,8 +757,8 @@ class DecodingTask:
             alternative_texts.append([tokenizer.decode(t).strip() for t in temp_tokens])
             alternative_tokens.append(temp_tokens)
 
-        tokens = alternative_tokens.pop(0)
-        texts = alternative_texts.pop(0)
+        tokens: alternative_tokens.pop(0)
+        texts: alternative_texts.pop(0)
 
 
         sum_logprobs: List[float] = [lp[i] for i, lp in zip(selected, sum_logprobs)]
