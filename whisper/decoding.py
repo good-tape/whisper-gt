@@ -10,6 +10,7 @@ from torch.distributions import Categorical
 from .audio import CHUNK_LENGTH
 from .tokenizer import Tokenizer, get_tokenizer
 from .utils import compression_ratio
+import logging
 
 if TYPE_CHECKING:
     from .model import Whisper
@@ -760,7 +761,7 @@ class DecodingTask:
         texts: List[str] = [tokenizer.decode(t).strip() for t in tokens]
 
         for i in [texts, *alternative_texts]:
-            print(f"Text: {i}")
+            logging.warning(f"Text: {i}")
 
 
         sum_logprobs: List[float] = [lp[i] for i, lp in zip(selected[0], sum_logprobs)]
