@@ -120,7 +120,6 @@ class DecodingResult:
     tokens: List[int] = field(default_factory=list)
     text: str = ""
     alternative_texts: List[str] = field(default_factory=list)
-    alternative_tokens: List[List[int]] = field(default_factory=list)
     avg_logprob: float = np.nan
     no_speech_prob: float = np.nan
     temperature: float = np.nan
@@ -751,14 +750,14 @@ class DecodingTask:
         # select the top-ranked sample in each group
         selected = self.sequence_ranker.rank(tokens, sum_logprobs)
         alternative_texts: List[str] = []
-        alternative_tokens: List[List[List[int]]] = []
         for i in range(len(selected)):
+            if i == 0:  pass
             temp_tokens: List[List[int]] = [t[i].tolist() for i, t in zip(selected[i], tokens)]
             alternative_texts.append([tokenizer.decode(t).strip() for t in temp_tokens])
-            alternative_tokens.append(temp_tokens)
 
-        tokens: alternative_tokens.pop(0)
-        texts: alternative_texts.pop(0)
+
+        tokens: List[List[int]] = [t[i].tolist() for i, t in zip(selected[0], tokens)]
+        texts: List[str] = [tokenizer.decode(t).strip() for t in tokens]
 
 
         sum_logprobs: List[float] = [lp[i] for i, lp in zip(selected, sum_logprobs)]
@@ -769,7 +768,6 @@ class DecodingTask:
         fields = (
             texts,
             alternative_texts,
-            alternative_tokens,
             languages,
             tokens,
             audio_features,
@@ -786,13 +784,12 @@ class DecodingTask:
                 tokens=tokens,
                 text=text,
                 alternative_texts=alternative_texts,
-                alternative_tokens=alternative_tokens,
                 avg_logprob=avg_logprob,
                 no_speech_prob=no_speech_prob,
                 temperature=self.options.temperature,
                 compression_ratio=compression_ratio(text),
             )
-            for text, alternative_texts, alternative_tokens, language, tokens, features, avg_logprob, no_speech_prob in zip(
+            for text, alternative_texts, language, tokens, features, avg_logprob, no_speech_prob in zip(
                 *fields
             )
         ]
