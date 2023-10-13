@@ -757,6 +757,8 @@ class DecodingTask:
             alternative_texts.append([tokenizer.decode(t).strip() for t in temp_tokens])
             alternative_tokens.append(temp_tokens)
 
+        for i in range(len(alternative_texts)):
+            print(f"Alternative {i}: {alternative_texts[i]}")
         tokens = alternative_tokens.pop(0)
         texts = alternative_texts.pop(0)
 
