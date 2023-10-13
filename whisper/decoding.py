@@ -763,7 +763,7 @@ class DecodingTask:
         texts = alternative_texts.pop(0)
 
 
-        sum_logprobs: List[float] = [lp[i] for i, lp in zip(selected[0], sum_logprobs)]
+        sum_logprobs: List[float] = [lp[i] for i, lp in zip(selected, sum_logprobs)]
         avg_logprobs: List[float] = [
             lp / (len(t) + 1) for t, lp in zip(tokens, sum_logprobs)
         ]
