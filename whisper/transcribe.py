@@ -211,6 +211,7 @@ def transcribe(
             "start": start,
             "end": end,
             "text": tokenizer.decode(text_tokens),
+            "alternative_texts": result.alternative_texts,
             "tokens": tokens,
             "temperature": result.temperature,
             "avg_logprob": result.avg_logprob,

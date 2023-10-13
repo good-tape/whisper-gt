@@ -119,6 +119,7 @@ class DecodingResult:
     language_probs: Optional[Dict[str, float]] = None
     tokens: List[int] = field(default_factory=list)
     text: str = ""
+    alternative_texts: List[str] = field(default_factory=list)
     avg_logprob: float = np.nan
     no_speech_prob: float = np.nan
     temperature: float = np.nan
@@ -177,24 +178,23 @@ class PyTorchInference(Inference):
 class SequenceRanker:
     def rank(
         self, tokens: List[List[Tensor]], sum_logprobs: List[List[float]]
-    ) -> List[int]:
+    ) -> List[List[int]]:
         """
         Given a list of groups of samples and their cumulative log probabilities,
         return the indices of the samples in each group to select as the final result
         """
         raise NotImplementedError
 
-
-class MaximumLikelihoodRanker(SequenceRanker):
+class TopThreeRanker(SequenceRanker):
     """
-    Select the sample with the highest log probabilities, penalized using either
-    a simple length normalization or Google NMT paper's length penalty
+    Select the top 3 samples with the highest log probabilities,
+    penalized using either a simple length normalization or Google NMT paper's length penalty
     """
 
     def __init__(self, length_penalty: Optional[float]):
         self.length_penalty = length_penalty
 
-    def rank(self, tokens: List[List[Tensor]], sum_logprobs: List[List[float]]):
+    def rank(self, tokens: List[List[Tensor]], sum_logprobs: List[List[float]]) -> List[List[int]]:
         def scores(logprobs, lengths):
             result = []
             for logprob, length in zip(logprobs, lengths):
@@ -206,9 +206,10 @@ class MaximumLikelihoodRanker(SequenceRanker):
                 result.append(logprob / penalty)
             return result
 
-        # get the sequence with the highest score
+        # get the sequences with the highest scores
         lengths = [[len(t) for t in s] for s in tokens]
-        return [np.argmax(scores(p, l)) for p, l in zip(sum_logprobs, lengths)]
+        return [list(np.argsort(scores(p, l))[-3:][::-1]) for p, l in zip(sum_logprobs, lengths)]
+
 
 
 class TokenDecoder:
@@ -535,7 +536,7 @@ class DecodingTask:
         self.inference = PyTorchInference(model, len(self.initial_tokens))
 
         # sequence ranker: implements how to rank a group of sampled sequences
-        self.sequence_ranker = MaximumLikelihoodRanker(options.length_penalty)
+        self.sequence_ranker = TopThreeRanker(options.length_penalty)
 
         # decoder: implements how to select the next tokens, given the autoregressive distribution
         if options.beam_size is not None:
@@ -748,8 +749,16 @@ class DecodingTask:
 
         # select the top-ranked sample in each group
         selected = self.sequence_ranker.rank(tokens, sum_logprobs)
-        tokens: List[List[int]] = [t[i].tolist() for i, t in zip(selected, tokens)]
+        alternative_texts: List[str] = []
+        for i in range(len(selected)):
+            if i == 0:  pass
+            temp_tokens: List[List[int]] = [t[i].tolist() for i, t in zip(selected[i], tokens)]
+            alternative_texts.append([tokenizer.decode(t).strip() for t in temp_tokens])
+
+
+        tokens: List[List[int]] = [t[i].tolist() for i, t in zip(selected[0], tokens)]
         texts: List[str] = [tokenizer.decode(t).strip() for t in tokens]
+
 
         sum_logprobs: List[float] = [lp[i] for i, lp in zip(selected, sum_logprobs)]
         avg_logprobs: List[float] = [
@@ -758,6 +767,7 @@ class DecodingTask:
 
         fields = (
             texts,
+            alternative_texts,
             languages,
             tokens,
             audio_features,
@@ -773,12 +783,13 @@ class DecodingTask:
                 language=language,
                 tokens=tokens,
                 text=text,
+                alternative_texts=alternative_texts,
                 avg_logprob=avg_logprob,
                 no_speech_prob=no_speech_prob,
                 temperature=self.options.temperature,
                 compression_ratio=compression_ratio(text),
             )
-            for text, language, tokens, features, avg_logprob, no_speech_prob in zip(
+            for text, alternative_texts, language, tokens, features, avg_logprob, no_speech_prob in zip(
                 *fields
             )
         ]
