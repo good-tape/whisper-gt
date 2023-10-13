@@ -235,140 +235,140 @@ def transcribe(
             tokens = torch.tensor(result.tokens)
             alternative_tokens_tensor = [torch.tensor(t) for t in result.alternative_tokens]
 
+            for tokens in [tokens, *alternative_tokens_tensor]:
+                if no_speech_threshold is not None:
+                    # no voice activity check
+                    should_skip = result.no_speech_prob > no_speech_threshold
+                    if (
+                        logprob_threshold is not None
+                        and result.avg_logprob > logprob_threshold
+                    ):
+                        # don't skip if the logprob is high enough, despite the no_speech_prob
+                        should_skip = False
 
-            if no_speech_threshold is not None:
-                # no voice activity check
-                should_skip = result.no_speech_prob > no_speech_threshold
-                if (
-                    logprob_threshold is not None
-                    and result.avg_logprob > logprob_threshold
-                ):
-                    # don't skip if the logprob is high enough, despite the no_speech_prob
-                    should_skip = False
+                    if should_skip:
+                        seek += segment_size  # fast-forward to the next segment boundary
+                        continue
 
-                if should_skip:
-                    seek += segment_size  # fast-forward to the next segment boundary
-                    continue
+                previous_seek = seek
+                current_segments = []
 
-            previous_seek = seek
-            current_segments = []
+                timestamp_tokens: torch.Tensor = tokens.ge(tokenizer.timestamp_begin)
+                single_timestamp_ending = timestamp_tokens[-2:].tolist() == [False, True]
 
-            timestamp_tokens: torch.Tensor = tokens.ge(tokenizer.timestamp_begin)
-            single_timestamp_ending = timestamp_tokens[-2:].tolist() == [False, True]
+                consecutive = torch.where(timestamp_tokens[:-1] & timestamp_tokens[1:])[0]
+                consecutive.add_(1)
+                if len(consecutive) > 0:
+                    # if the output contains two consecutive timestamp tokens
+                    slices = consecutive.tolist()
+                    if single_timestamp_ending:
+                        slices.append(len(tokens))
 
-            consecutive = torch.where(timestamp_tokens[:-1] & timestamp_tokens[1:])[0]
-            consecutive.add_(1)
-            if len(consecutive) > 0:
-                # if the output contains two consecutive timestamp tokens
-                slices = consecutive.tolist()
-                if single_timestamp_ending:
-                    slices.append(len(tokens))
+                    last_slice = 0
+                    for current_slice in slices:
+                        sliced_tokens = tokens[last_slice:current_slice]
+                        start_timestamp_pos = (
+                            sliced_tokens[0].item() - tokenizer.timestamp_begin
+                        )
+                        end_timestamp_pos = (
+                            sliced_tokens[-1].item() - tokenizer.timestamp_begin
+                        )
+                        current_segments.append(
+                            new_segment(
+                                start=time_offset + start_timestamp_pos * time_precision,
+                                end=time_offset + end_timestamp_pos * time_precision,
+                                tokens=sliced_tokens,
+                                result=result,
+                            )
+                        )
+                        last_slice = current_slice
 
-                last_slice = 0
-                for current_slice in slices:
-                    sliced_tokens = tokens[last_slice:current_slice]
-                    start_timestamp_pos = (
-                        sliced_tokens[0].item() - tokenizer.timestamp_begin
-                    )
-                    end_timestamp_pos = (
-                        sliced_tokens[-1].item() - tokenizer.timestamp_begin
-                    )
+                    if single_timestamp_ending:
+                        # single timestamp at the end means no speech after the last timestamp.
+                        seek += segment_size
+                    else:
+                        # otherwise, ignore the unfinished segment and seek to the last timestamp
+                        last_timestamp_pos = (
+                            tokens[last_slice - 1].item() - tokenizer.timestamp_begin
+                        )
+                        seek += last_timestamp_pos * input_stride
+                else:
+                    duration = segment_duration
+                    timestamps = tokens[timestamp_tokens.nonzero().flatten()]
+                    if (
+                        len(timestamps) > 0
+                        and timestamps[-1].item() != tokenizer.timestamp_begin
+                    ):
+                        # no consecutive timestamps but it has a timestamp; use the last one.
+                        last_timestamp_pos = (
+                            timestamps[-1].item() - tokenizer.timestamp_begin
+                        )
+                        duration = last_timestamp_pos * time_precision
+
                     current_segments.append(
                         new_segment(
-                            start=time_offset + start_timestamp_pos * time_precision,
-                            end=time_offset + end_timestamp_pos * time_precision,
-                            tokens=sliced_tokens,
+                            start=time_offset,
+                            end=time_offset + duration,
+                            tokens=tokens,
                             result=result,
                         )
                     )
-                    last_slice = current_slice
-
-                if single_timestamp_ending:
-                    # single timestamp at the end means no speech after the last timestamp.
                     seek += segment_size
-                else:
-                    # otherwise, ignore the unfinished segment and seek to the last timestamp
-                    last_timestamp_pos = (
-                        tokens[last_slice - 1].item() - tokenizer.timestamp_begin
-                    )
-                    seek += last_timestamp_pos * input_stride
-            else:
-                duration = segment_duration
-                timestamps = tokens[timestamp_tokens.nonzero().flatten()]
-                if (
-                    len(timestamps) > 0
-                    and timestamps[-1].item() != tokenizer.timestamp_begin
-                ):
-                    # no consecutive timestamps but it has a timestamp; use the last one.
-                    last_timestamp_pos = (
-                        timestamps[-1].item() - tokenizer.timestamp_begin
-                    )
-                    duration = last_timestamp_pos * time_precision
 
-                current_segments.append(
-                    new_segment(
-                        start=time_offset,
-                        end=time_offset + duration,
-                        tokens=tokens,
-                        result=result,
+                if word_timestamps:
+                    add_word_timestamps(
+                        segments=current_segments,
+                        model=model,
+                        tokenizer=tokenizer,
+                        mel=mel_segment,
+                        num_frames=segment_size,
+                        prepend_punctuations=prepend_punctuations,
+                        append_punctuations=append_punctuations,
+                        last_speech_timestamp=last_speech_timestamp,
                     )
+                    word_end_timestamps = [
+                        w["end"] for s in current_segments for w in s["words"]
+                    ]
+                    if len(word_end_timestamps) > 0:
+                        last_speech_timestamp = word_end_timestamps[-1]
+                    if not single_timestamp_ending and len(word_end_timestamps) > 0:
+                        seek_shift = round(
+                            (word_end_timestamps[-1] - time_offset) * FRAMES_PER_SECOND
+                        )
+                        if seek_shift > 0:
+                            seek = previous_seek + seek_shift
+
+                if verbose:
+                    for segment in current_segments:
+                        start, end, text = segment["start"], segment["end"], segment["text"]
+                        line = f"[{format_timestamp(start)} --> {format_timestamp(end)}] {text}"
+                        print(make_safe(line))
+
+                # if a segment is instantaneous or does not contain text, clear it
+                for i, segment in enumerate(current_segments):
+                    if segment["start"] == segment["end"] or segment["text"].strip() == "":
+                        segment["text"] = ""
+                        segment["tokens"] = []
+                        segment["words"] = []
+
+                all_segments.extend(
+                    [
+                        {"id": i, **segment}
+                        for i, segment in enumerate(
+                            current_segments, start=len(all_segments)
+                        )
+                    ]
                 )
-                seek += segment_size
-
-            if word_timestamps:
-                add_word_timestamps(
-                    segments=current_segments,
-                    model=model,
-                    tokenizer=tokenizer,
-                    mel=mel_segment,
-                    num_frames=segment_size,
-                    prepend_punctuations=prepend_punctuations,
-                    append_punctuations=append_punctuations,
-                    last_speech_timestamp=last_speech_timestamp,
+                all_tokens.extend(
+                    [token for segment in current_segments for token in segment["tokens"]]
                 )
-                word_end_timestamps = [
-                    w["end"] for s in current_segments for w in s["words"]
-                ]
-                if len(word_end_timestamps) > 0:
-                    last_speech_timestamp = word_end_timestamps[-1]
-                if not single_timestamp_ending and len(word_end_timestamps) > 0:
-                    seek_shift = round(
-                        (word_end_timestamps[-1] - time_offset) * FRAMES_PER_SECOND
-                    )
-                    if seek_shift > 0:
-                        seek = previous_seek + seek_shift
 
-            if verbose:
-                for segment in current_segments:
-                    start, end, text = segment["start"], segment["end"], segment["text"]
-                    line = f"[{format_timestamp(start)} --> {format_timestamp(end)}] {text}"
-                    print(make_safe(line))
+                if not condition_on_previous_text or result.temperature > 0.5:
+                    # do not feed the prompt tokens if a high temperature was used
+                    prompt_reset_since = len(all_tokens)
 
-            # if a segment is instantaneous or does not contain text, clear it
-            for i, segment in enumerate(current_segments):
-                if segment["start"] == segment["end"] or segment["text"].strip() == "":
-                    segment["text"] = ""
-                    segment["tokens"] = []
-                    segment["words"] = []
-
-            all_segments.extend(
-                [
-                    {"id": i, **segment}
-                    for i, segment in enumerate(
-                        current_segments, start=len(all_segments)
-                    )
-                ]
-            )
-            all_tokens.extend(
-                [token for segment in current_segments for token in segment["tokens"]]
-            )
-
-            if not condition_on_previous_text or result.temperature > 0.5:
-                # do not feed the prompt tokens if a high temperature was used
-                prompt_reset_since = len(all_tokens)
-
-            # update progress bar
-            pbar.update(min(content_frames, seek) - previous_seek)
+                # update progress bar
+                pbar.update(min(content_frames, seek) - previous_seek)
 
     return dict(
         text=tokenizer.decode(all_tokens[len(initial_prompt_tokens) :]),
